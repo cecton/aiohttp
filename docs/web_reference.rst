@@ -1364,6 +1364,30 @@ duplicated like one using :meth:`Application.copy`.
       The purpose of the method is calling :attr:`on_cleanup` signal
       handlers.
 
+   .. method:: add_task(coro)
+
+      Register a coroutine that will become a task when the application
+      is ran. This is useful if you need background tasks to run during the
+      execution of your application.
+
+      When the application starts, the coroutines are called with the
+      application in argument and make background tasks.
+
+      When the application shuts down, the tasks are cancelled and awaited
+      properly.
+
+   .. method:: create_all_tasks()
+
+      Create background tasks and execute all the coroutines added by
+      :method:`add_task`.
+
+   .. coroutinemethod:: cancel_all_tasks(nowait=False)
+
+      :param bool nowait: do not await the cancelled tasks.
+
+      Cancel all the tasks created and await for their execution to
+      complete.
+
    .. note::
 
       Application object has :attr:`router` attribute but has no

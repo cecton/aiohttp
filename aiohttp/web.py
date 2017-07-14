@@ -75,6 +75,8 @@ class Application(MutableMapping):
         self._state = {}
         self._frozen = False
         self._subapps = []
+        self._background_coroutines = []
+        self._tasks = []
 
         self._on_pre_signal = PreSignal()
         self._on_post_signal = PostSignal()
@@ -274,6 +276,32 @@ class Application(MutableMapping):
         """
         yield from self.on_cleanup.send(self)
 
+    def add_task(self, coro):
+        self._background_coroutines.append(coro)
+
+    @asyncio.coroutine
+    def _run_task(self, coro):
+        try:
+            yield from coro(self)
+        except Exception:
+            self.logger.exception("Coroutine %r failed", coro)
+
+    def create_all_tasks(self):
+        for coro in self._background_coroutines:
+            self._tasks.append(self.loop.create_task(self._run_task(coro)))
+
+    @asyncio.coroutine
+    def cancel_all_tasks(self, nowait=False):
+        for task in self._tasks:
+            task.cancel()
+            if nowait and task.done():
+                task.exception()
+            elif not nowait:
+                try:
+                    yield from task
+                except:
+                    pass
+
     def _make_request(self, message, payload, protocol, writer, task,
                       _cls=web_request.Request):
         return _cls(
@@ -422,6 +450,7 @@ def run_app(app, *, host=None, port=None, path=None, sock=None,
 
     try:
         loop.run_until_complete(app.startup())
+        app.create_all_tasks()
 
         make_handler_kwargs = dict()
         if access_log_format is not None:
@@ -461,6 +490,14 @@ def run_app(app, *, host=None, port=None, path=None, sock=None,
                 asyncio.gather(*server_closures, loop=loop))
             loop.run_until_complete(app.shutdown())
             loop.run_until_complete(handler.shutdown(shutdown_timeout))
+    except Exception:
+        loop.run_until_complete(app.cancel_all_tasks())
+        raise
+    except BaseException:
+        loop.run_until_complete(app.cancel_all_tasks(nowait=True))
+        raise
+    else:
+        loop.run_until_complete(app.cancel_all_tasks())
     finally:
         loop.run_until_complete(app.cleanup())
     if not user_supplied_loop:

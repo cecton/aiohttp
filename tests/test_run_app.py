@@ -60,6 +60,12 @@ def stopper(loop):
     return f
 
 
+def send_graceful_exit(loop):
+    def f(*args):
+        loop.call_later(0.001, web.raise_graceful_exit)
+    return f
+
+
 def test_run_app_http(loop, mocker):
     skip_if_no_dict(loop)
 
@@ -579,3 +585,146 @@ def test_exception_during_startup_prevents_running(loop, mocker):
         web.run_app(app, loop=loop, host=(), print=stopper(loop))
 
     app.cleanup.assert_called_once_with()
+
+
+def test_background_task(loop, mocker):
+    skip_if_no_dict(loop)
+
+    app = web.Application()
+    mocked_func = mocker.Mock()
+    app.add_task(asyncio.coroutine(mocked_func))
+
+    mocker.spy(app, 'create_all_tasks')
+    mocker.spy(app, 'cancel_all_tasks')
+
+    web.run_app(app, loop=loop, host=(), print=stopper(loop))
+
+    app.create_all_tasks.assert_called_once_with()
+    app.cancel_all_tasks.assert_called_once_with()
+    mocked_func.assert_called_once_with(app)
+
+
+def test_background_task_log_when_failing(loop, mocker):
+    skip_if_no_dict(loop)
+
+    coro = asyncio.coroutine(mocker.Mock(side_effect=RuntimeError()))
+
+    app = web.Application()
+    app.add_task(coro)
+
+    mocker.spy(app, 'create_all_tasks')
+    mocker.spy(app, 'cancel_all_tasks')
+    # NOTE: cannot use mocker.spy here on Python < 3.6. Reason is unknown
+    setattr(app.logger, 'exception', mocker.Mock())
+
+    web.run_app(app, loop=loop, host=(), print=stopper(loop))
+
+    app.create_all_tasks.assert_called_once_with()
+    app.cancel_all_tasks.assert_called_once_with()
+    app.logger.exception.assert_called_once_with("Coroutine %r failed", coro)
+
+
+def test_background_task_system_exit_no_wait(loop, mocker):
+    skip_if_no_dict(loop)
+
+    coro = asyncio.coroutine(mocker.Mock(side_effect=SystemExit()))
+
+    app = web.Application()
+    app.add_task(coro)
+
+    mocker.spy(app, 'create_all_tasks')
+    mocker.spy(app, 'cancel_all_tasks')
+    # NOTE: cannot use mocker.spy here on Python < 3.6. Reason is unknown
+    setattr(app.logger, 'exception', mocker.Mock())
+
+    with pytest.raises(SystemExit):
+        web.run_app(app, loop=loop, host=(), print=stopper(loop))
+
+    app.create_all_tasks.assert_called_once_with()
+    app.cancel_all_tasks.assert_called_once_with(nowait=True)
+    app.logger.exception.assert_not_called()
+
+    assert all(task.done() for task in app._tasks), \
+        "some background tasks have not been canceled and awaited"
+
+
+@asyncio.coroutine
+def _slow_coroutine(app):
+    app["slow_coroutine"] = "running"
+    for i in range(4):
+        try:
+            # NOTE: in Python 3.4 asyncio.sleep, you must specify the loop or
+            #       it will fallback to the current loop (which is not set
+            #       during test)
+            task = app.loop.create_task(asyncio.sleep(0.5, loop=app.loop))
+            yield from asyncio.shield(task)
+        except asyncio.CancelledError:
+            yield from task
+            app["slow_coroutine"] = "cancelled"
+            break
+    else:
+        app["slow_coroutine"] = "completed"
+
+
+def test_background_task_cancel_and_await_all_tasks(loop, mocker):
+    skip_if_no_dict(loop)
+
+    app = web.Application()
+    app.add_task(_slow_coroutine)
+
+    mocker.spy(app, 'create_all_tasks')
+    mocker.spy(app, 'cancel_all_tasks')
+
+    web.run_app(app, loop=loop, host=(), print=stopper(loop))
+
+    app.create_all_tasks.assert_called_once_with()
+    app.cancel_all_tasks.assert_called_once_with()
+
+    assert app["slow_coroutine"] == "cancelled"
+    assert all(task.done() for task in app._tasks), \
+        "some background tasks have not been cancelled and awaited"
+
+
+def test_background_task_system_exit_cancel_all_tasks_no_wait(loop, mocker):
+    skip_if_no_dict(loop)
+
+    coro = asyncio.coroutine(mocker.Mock(side_effect=SystemExit()))
+
+    app = web.Application()
+    app.add_task(_slow_coroutine)
+    app.add_task(coro)
+
+    mocker.spy(app, 'create_all_tasks')
+    mocker.spy(app, 'cancel_all_tasks')
+    # NOTE: cannot use mocker.spy here on Python < 3.6. Reason is unknown
+    setattr(app.logger, 'exception', mocker.Mock())
+
+    with pytest.raises(SystemExit):
+        web.run_app(app, loop=loop, host=(), print=stopper(loop))
+
+    app.create_all_tasks.assert_called_once_with()
+    app.cancel_all_tasks.assert_called_once_with(nowait=True)
+    app.logger.exception.assert_not_called()
+
+    assert app["slow_coroutine"] == "running"
+    assert any(task.done() for task in app._tasks), \
+        "at least one background task has been destroyed"
+
+
+def test_background_task_graceful_exit_wait_tasks(loop, mocker):
+    skip_if_no_dict(loop)
+
+    app = web.Application()
+    app.add_task(_slow_coroutine)
+
+    mocker.spy(app, 'create_all_tasks')
+    mocker.spy(app, 'cancel_all_tasks')
+
+    web.run_app(app, loop=loop, host=(), print=send_graceful_exit(loop))
+
+    app.create_all_tasks.assert_called_once_with()
+    app.cancel_all_tasks.assert_called_once_with()
+
+    assert app["slow_coroutine"] == "cancelled"
+    assert all(task.done() for task in app._tasks), \
+        "some background tasks have not been canceled and awaited"
