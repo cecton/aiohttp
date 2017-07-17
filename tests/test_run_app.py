@@ -592,7 +592,7 @@ def test_background_task(loop, mocker):
 
     app = web.Application()
     mocked_func = mocker.Mock()
-    app.add_task(asyncio.coroutine(mocked_func))
+    app.add_task(asyncio.coroutine(lambda app: mocked_func(app)))
 
     mocker.spy(app, 'create_all_tasks')
     mocker.spy(app, 'cancel_all_tasks')
