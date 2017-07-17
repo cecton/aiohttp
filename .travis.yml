@@ -6,6 +6,7 @@ python:
 # python3.4.2 has bug in http.cookies module, aiohttp provides fix for it
 - 3.4.2
 - 3.4.3
+- 3.4.6
 - 3.5.2
 - 3.5
 - &mainstream_python 3.6

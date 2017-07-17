@@ -624,6 +624,9 @@ def test_background_task_log_when_failing(loop, mocker):
     app.logger.exception.assert_called_once_with("Coroutine %r failed", coro)
 
 
+@pytest.mark.skipif(sys.version_info < (3, 4, 4),
+                    reason="Version of Python < 3.4.4 not supported for this"
+                           "feature")
 def test_background_task_system_exit_no_wait(loop, mocker):
     skip_if_no_dict(loop)
 
@@ -685,6 +688,9 @@ def test_background_task_cancel_and_await_all_tasks(loop, mocker):
         "some background tasks have not been cancelled and awaited"
 
 
+@pytest.mark.skipif(sys.version_info < (3, 4, 4),
+                    reason="Version of Python < 3.4.4 not supported for this"
+                           "feature")
 def test_background_task_system_exit_cancel_all_tasks_no_wait(loop, mocker):
     skip_if_no_dict(loop)
 
