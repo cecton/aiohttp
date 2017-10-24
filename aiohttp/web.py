@@ -337,6 +337,45 @@ class Application(MutableMapping):
     def __repr__(self):
         return "<Application 0x{:x}>".format(id(self))
 
+    async def start(self, *, host=None, port=None, path=None, sock=None,
+                    ssl_context=None,
+                    backlog=128, access_log_format=None,
+                    access_log=access_logger):
+        loop = asyncio.get_event_loop()
+
+        self._set_loop(loop)
+        await self.startup()
+
+        try:
+            make_handler_kwargs = dict()
+            if access_log_format is not None:
+                make_handler_kwargs['access_log_format'] = access_log_format
+            self._handler = self.make_handler(loop=loop, access_log=access_log,
+                                              **make_handler_kwargs)
+
+            server_creations, uris = _make_server_creators(
+                self._handler,
+                loop=loop, ssl_context=ssl_context,
+                host=host, port=port, path=path, sock=sock,
+                backlog=backlog)
+            self._servers = await asyncio.gather(*server_creations)
+
+            return uris
+
+        except:
+            await self.cleanup()
+
+    async def stop(self, *, shutdown_timeout=60.0):
+        server_closures = []
+        for srv in self._servers:
+            srv.close()
+            server_closures.append(srv.wait_closed())
+        await asyncio.gather(*server_closures)
+        await self.shutdown()
+        await self._handler.shutdown(shutdown_timeout)
+        await self.cleanup()
+        await self.cleanup()
+
 
 class GracefulExit(SystemExit):
     code = 1
@@ -426,60 +465,32 @@ def _make_server_creators(handler, *, loop, ssl_context,
     return server_creations, uris
 
 
-def run_app(app, *, host=None, port=None, path=None, sock=None,
-            shutdown_timeout=60.0, ssl_context=None,
-            print=print, backlog=128, access_log_format=None,
-            access_log=access_logger, handle_signals=True, loop=None):
+def run_app(app, *, handle_signals=True, print=print, loop=None,
+            shutdown_timeout=60.0, **kwargs):
     """Run an app locally"""
     user_supplied_loop = loop is not None
     if loop is None:
         loop = asyncio.get_event_loop()
 
-    app._set_loop(loop)
-    loop.run_until_complete(app.startup())
-
-    try:
-        make_handler_kwargs = dict()
-        if access_log_format is not None:
-            make_handler_kwargs['access_log_format'] = access_log_format
-        handler = app.make_handler(loop=loop, access_log=access_log,
-                                   **make_handler_kwargs)
-
-        server_creations, uris = _make_server_creators(
-            handler,
-            loop=loop, ssl_context=ssl_context,
-            host=host, port=port, path=path, sock=sock,
-            backlog=backlog)
-        servers = loop.run_until_complete(
-            asyncio.gather(*server_creations, loop=loop)
-        )
-
-        if handle_signals:
-            try:
-                loop.add_signal_handler(signal.SIGINT, raise_graceful_exit)
-                loop.add_signal_handler(signal.SIGTERM, raise_graceful_exit)
-            except NotImplementedError:  # pragma: no cover
-                # add_signal_handler is not implemented on Windows
-                pass
-
+    if handle_signals:
         try:
-            if print:
-                print("======== Running on {} ========\n"
-                      "(Press CTRL+C to quit)".format(', '.join(uris)))
-            loop.run_forever()
-        except (GracefulExit, KeyboardInterrupt):  # pragma: no cover
+            loop.add_signal_handler(signal.SIGINT, raise_graceful_exit)
+            loop.add_signal_handler(signal.SIGTERM, raise_graceful_exit)
+        except NotImplementedError:  # pragma: no cover
+            # add_signal_handler is not implemented on Windows
             pass
-        finally:
-            server_closures = []
-            for srv in servers:
-                srv.close()
-                server_closures.append(srv.wait_closed())
-            loop.run_until_complete(
-                asyncio.gather(*server_closures, loop=loop))
-            loop.run_until_complete(app.shutdown())
-            loop.run_until_complete(handler.shutdown(shutdown_timeout))
+
+    uris = loop.run_until_complete(app.start(**kwargs))
+    try:
+        if print:
+            print("======== Running on {} ========\n"
+                  "(Press CTRL+C to quit)".format(', '.join(uris)))
+        loop.run_forever()
+    except (GracefulExit, KeyboardInterrupt):  # pragma: no cover
+        pass
     finally:
-        loop.run_until_complete(app.cleanup())
+        loop.run_until_complete(app.stop(shutdown_timeout=shutdown_timeout))
+
     if not user_supplied_loop:
         if hasattr(loop, 'shutdown_asyncgens'):
             loop.run_until_complete(loop.shutdown_asyncgens())
